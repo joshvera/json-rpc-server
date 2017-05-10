@@ -33,6 +33,8 @@ module Network.JsonRpc.Server (
 
 import Network.JsonRpc.Types
 import Data.Text (Text, append, pack)
+import qualified Data.Text.Lazy as LT
+import Data.Text.Lazy.Encoding (encodeUtf8)
 import Data.Maybe (catMaybes)
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Aeson as A
@@ -69,9 +71,9 @@ import Control.Applicative ((<$>))
 -- access to an 'MVar' counter.  The program reads requests from
 -- stdin and writes responses to stdout. Compile it with the build
 -- flag @demo@.
---   
+--
 -- > <insert Demo.hs>
---   
+--
 
 -- | Creates a method from a name, function, and parameter descriptions.
 --   The parameter names must be unique.
@@ -113,19 +115,22 @@ callWithBatchStrategy strategy methods =
              map (\mth@(Method name _) -> (name, mth)) methods
     parse :: B.ByteString -> Either RpcError (Either A.Value [A.Value])
     parse = runIdentity . runExceptT . parseVal <=< parseJson
-    parseJson = maybe invalidJson return . A.decode
+    parseJson = maybe invalidJson return . A.decode . dropHeader
+    dropHeader = B.tail . B.tail . B.tail . B.tail . B.dropWhile (/= (toEnum $ fromEnum '\r'))
     parseVal val =
         case val of
           obj@(A.Object _) -> return $ Left obj
           A.Array vec | V.null vec -> throwInvalidRpc "Empty batch request"
                       | otherwise -> return $ Right $ V.toList vec
           _ -> throwInvalidRpc "Not a JSON object or array"
-    callMethod rq =
+    callMethod rq = fmap addHeader `liftM`
         case rq of
           Left val -> encodeJust `liftM` singleCall mthMap val
           Right vals -> encodeJust `liftM` batchCall strategy mthMap vals
       where
         encodeJust r = A.encode <$> r
+        addHeader :: B.ByteString -> B.ByteString
+        addHeader str = encodeUtf8 ("Content-Length: " `LT.append` LT.pack (show (B.length str)) `LT.append` "\r\n" `LT.append` "Content-Type: application/vscode-jsonrpc; charset=utf-8" `LT.append` "\r\n\r\n") `B.append` str
     returnErr = return . Just . A.encode . nullIdResponse
     invalidJson = throwError $ rpcError (-32700) "Invalid JSON"
 
